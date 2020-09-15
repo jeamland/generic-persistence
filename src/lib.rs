@@ -1,23 +1,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type ObjectId = Uuid;
 
-pub trait PersistenceManager: Sized {
+#[async_trait]
+pub trait PersistenceManager {
     type Error: Send + Sync;
 
-    fn persistence<T, P>(self: &Arc<Self>) -> Arc<P>
+    async fn get_by_id<T>(self: Arc<Self>, id: ObjectId) -> Result<T, Self::Error>
     where
-        T: Persistent,
-        P: Persistence<Self, T>;
-}
-
-#[async_trait]
-pub trait Persistence<M: PersistenceManager, T: Persistent> {
-    async fn get_by_id(self: Arc<Self>, id: ObjectId) -> Result<T, M::Error>;
-    async fn save(self: Arc<Self>, mut object: T) -> Result<(), M::Error>;
+        T: Persistent + Deserialize<'async_trait>;
+    async fn save<T>(self: Arc<Self>, mut object: T) -> Result<(), Self::Error>
+    where
+        T: Persistent + Serialize;
 }
 
 pub trait Persistent {
@@ -28,11 +26,13 @@ pub trait Persistent {
 mod tests {
     use std::collections::HashMap;
 
+    use serde_json;
+
     use crate::*;
 
     struct Widget {
         id: ObjectId,
-        value: u32,
+        pub value: u32,
     }
 
     impl Widget {
@@ -51,7 +51,7 @@ mod tests {
     }
 
     struct TransientPersistence {
-        objects: HashMap<ObjectId, Box<dyn Persistent>>,
+        objects: HashMap<ObjectId, String>,
     }
 
     impl TransientPersistence {
@@ -65,6 +65,7 @@ mod tests {
     #[derive(Debug)]
     enum TransientError {
         NoObject,
+        BadObject,
     }
 
     impl std::fmt::Display for TransientError {
@@ -75,21 +76,29 @@ mod tests {
 
     impl std::error::Error for TransientError {}
 
+    #[async_trait]
     impl PersistenceManager for TransientPersistence {
         type Error = TransientError;
-    }
 
-    #[async_trait]
-    impl Persistence<TransientPersistence, Widget> for TransientPersistence {
-        async fn get_by_id(
-            self: Arc<Self>,
-            id: ObjectId,
-        ) -> Result<Self, <TransientPersistence as PersistenceManager>::Error> {
-            // This I doubt will ever work.
-            match self.objects.get(id) {
-                Some(o) => Ok(o.into()),
-                None => Err(),
-            }
+        async fn get_by_id<T>(self: Arc<Self>, id: ObjectId) -> Result<T, Self::Error>
+        where
+            T: Persistent + Deserialize<'async_trait>,
+        {
+            let json = match self.objects.get(&id) {
+                Some(s) => s,
+                None => return Err(TransientError::NoObject),
+            };
+
+            serde_json::from_str(json).map_err(|_| TransientError::BadObject)
+        }
+
+        async fn save<T>(self: Arc<Self>, mut object: T) -> Result<(), Self::Error>
+        where
+            T: Persistent + Serialize,
+        {
+            let json = serde_json::to_string(object).map_err(|_| TransientError::BadObject)?;
+            self.objects.insert(object.id(), json);
+            Ok(())
         }
     }
 
@@ -97,5 +106,11 @@ mod tests {
     fn test_widget() {
         let persistence = TransientPersistence::new();
         let widget = Widget::new(23);
+
+        persistence.save(widget);
+        let w2 = persistence.get_by_id(widget.id());
+
+        assert_eq!(widget.id(), w2.id());
+        assert_eq!(widget.value, w2.value);
     }
 }
