@@ -153,4 +153,24 @@ mod tests {
 
         Ok(())
     }
+
+    #[async_std::test]
+    async fn test_widget_and_thingy() -> Result<(), TransientError> {
+        let mut persistence = TransientPersistence::new();
+        let widget = Widget::new(23);
+        let thingy = Thingy::new("twenty-three");
+
+        persistence.save(&widget).await?;
+        persistence.save(&thingy).await?;
+        let w2: Widget = persistence.get_by_id(widget.id()).await?;
+        let t2: Thingy = persistence.get_by_id(thingy.id()).await?;
+
+        assert_eq!(widget.id(), w2.id());
+        assert_eq!(widget.value, w2.value);
+
+        assert_eq!(thingy.id(), t2.id());
+        assert_eq!(thingy.value, t2.value);
+
+        Ok(())
+    }
 }
